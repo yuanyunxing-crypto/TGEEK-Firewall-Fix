@@ -129,7 +129,19 @@ cat /tmp/tgeek-v141-smart.error 2>/dev/null
 
 参考：OAF 特征格式 https://doc.openappfilter.com/en/download.html；OAF https://github.com/destan19/OpenAppFilter；Mihomo https://wiki.metacubex.one/en/api/；nftables 命名计数器 https://wiki.nftables.org/wiki-nftables/index.php/Counters 。
 
+一、补充 YouTube 特征库
+修改前：
+3049 Youtube:[tcp;;;youtube;;]
 
+
+修改后：
+3049 Youtube:[tcp;;;youtube;;,tcp;;;googlevideo.com;;,tcp;;;ytimg.com;;,tcp;;;youtu.be;;]
+
+
+这种修改符合 OAF 官方特征库的域名匹配格式。
+OpenAppFilter
+
+二、一键备份并修改
 在 TGEEK 执行以下完整命令，包含原始文件备份及规则校验：
 ```
 (
