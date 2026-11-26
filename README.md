@@ -1,193 +1,110 @@
-# TGEEK Firewall Fix V1.4.4 — OAF Feature-Driven App Precision Guard
+# TGEEK Firewall Fix V1.4.8 — Stable Guard
 
-OpenWrt 24.10.x / FW4 · 实机验收候选版（RC） · 2026-11-26
+2026-11-26 · OpenWrt 24.10.x / FW4 · **实机验收候选版**（独立于 V1.4.7.2 发布，旧包不变）
 
-## 1. 更新目标
+## 1. 修复范围
 
-以 V1.4.3 为基线进行原位升级。保留已经验证有效的通用 Mark Guard，以及 Time Guard、Smart Offloading、Docker/FW4 和 RRDIPT Guard。移除旧版为 YouTube、腾讯视频、优酷分别维护的域名名单。本版没有任何固定应用 ID/域名规则，不新增第二套应用配置，不改变 OAF 原始特征库或驱动。
+TIJIWrt 实机：R1 特征库 565 ID，11:03 文件变成 0 字节，导致 `feature-unavailable`、精准表与 QUIC 表同时消失；恢复文件后两个表自动重建。TGEEK 已验证 V1.4.7.2 全新时间模块安装 `legacy=0`、QUIC 保存、所有应用 565 与指定应用 550 切换；TIJIWrt 已验证迁移 `legacy=2`、560 个指定应用和 QUIC 双栈实际命中。以上是旧版实机结果，不是新版实机验收结果。
 
-OAF 是唯一应用策略来源：已提交的 `appfilter.rule.app_list`、全局启用状态、用户模式、指定设备、白名单以及内核实际运行状态。当前活动特征文件 `/tmp/feature.cfg` 决定有效的 ID、应用名称和可解析的特征。每轮重新读取，文件 SHA256 发生变化时重建增强规则并重新开始统计，防止同一 ID 在特征库更新后被赋予不同名称。这里的同步是读取当前特征库，不是下载、更新或修改特征库。
+- Feature Guard：定期校验活动文件 `/etc/appfilter/feature.cfg`（原生 `/tmp/feature.cfg` 软链接）。校验 ID 唯一、结构边界、大小≤4 MiB、1–4096 ID 及 SHA256。不是 DPI 规则语义验证。
+- 可信备份：第一次自动备份要求覆盖已选 ID；两次一致快照间隔至少5秒。新文件保留所有旧 ID 时，允许同样的两次一致检测后自动更新备份；减少/替换 ID 需管理员主动批准。校验不通过不覆盖旧备份。内容寻址文件及 current/previous 指针原子提交，只在内容变化时写入持久盘。历史快照保留，不自动清理。
+- 空文件/缺失文件：连续两次检查、间隔至少5秒，且有 SHA256 一致的备份时，原目录临时文件+rename 恢复；恢复权限 644。**不会覆盖非空文件**（包括格式损坏或可能正处于上传的文件），不强制重启 OAF，无法保证原生 DPI 已重新加载。非空异常需管理员修复；日志报告原因。
+- QUIC 解耦：特征库异常、待验证或精准 nft 事务失败不会自动删除 QUIC 表。仍需 OAF 开关、运行时限制时段、Connection Guard、过滤模式、有效设备范围、非空已配置 ID 列表、LAN/出口验证、无冲突分载；仅对目标设备外网 UDP443 丢包，25秒租期。此为协议级限制，不等同于单个应用识别。
+- 精准过滤：仅用与可信备份一致的活动快照；不拿旧特征库去匹配已变化的活动目录。不扩大设备范围、不整机断网、不主动清空 conntrack。
+- Mark：保留 V1.4.7.2 的精确 ID 模式及冲突检查，新增 `mark-audit`。观察到 0x80000FA1（候选 ID 4001）及 0x40000000（仅标志候选），未取得与私有引擎5.3.2一致的定义，**仅诊断，不启用复合标记拦截，也不修改连接标记**。
+- Nikki：可用 Lua JSON 解码时一次预筛选受控 IP（含 IPv4-mapped IPv6），失败回退旧遍历；保留3秒轮转扫描预算，增加 `scan_mode/scan_done/scan_total`，`partial=1` 表示本轮未完成。不保证 API 会匹配所有流量。
+- 周期全库同步及手动 `luci-sync`：仅在特征文件与备份一致时执行。原 LuCI 保存逻辑保留；更新特征库期间请勿在 LuCI 保存全应用名单，等 `feature-verify` 成功后再操作。
+- 继承 LuCI 中文、所有/指定应用模式、V2.1.1 独立星期、Smart Offloading、RRDIPT、Docker/FW4、原 Time Guard。旧内部表名、路径保留，避免重复创建。
 
-## 2. 应用管控机制
+## 2. 升级 TIJIWrt 或 TGEEK
 
-### App Mark Guard
+建议先在 TIJIWrt 本地管理时升级，通过后再安装 TGEEK。不要删除原 OAF、旧时间补丁或已有 V1.4.7.2 备份。完整安装沿用 V1.4.7.2 流程，可能重载防火墙，网络可能短暂受影响。先留一个 SSH 会话、确认本地访问可用。包不包含 R1 私有特征库，不下载第三方特征库，不替换 OAF 内核。
 
-- 只对当前受控 MAC/邻居地址、禁止应用 ID 与当前特征库的交集生效，排除 OAF 白名单。
-- 使用与 V1.4.3 相同的保守兼容条件：OAF 驱动 5.3.2、可读取规则集且未发现明显的其他连接标记写入者；只匹配完整应用 ID，绝不猜测高位标志、掩码或修改 ct mark。发现 mwan3/CONNMARK 等冲突或未知驱动时停用 Mark Guard，报告降级。检查并不能证明不存在其他内核模块写 mark。
-- 外网转发及符合路由条件的早期链持续拦截已识别的新旧应用连接；TCP 在转发链尝试 RST，早期链及 UDP 丢弃。每个应用设置独立 nftables 命名计数器。
-- 保留已有连接的识别标记，不执行 `conntrack -F` 或按设备清空连接。不创建整机 INPUT/OUTPUT 断流链，不默认阻断 UDP/443。
-- 跳过路由器本地目的地址和 DNS/DoT 端口，限于 WAN/Nikki 外网路径；不会主动断开 LuCI、SSH、同网段 NAS。经外网或代理访问的管理业务不保证等同本地管理；OAF 原生误分类及原有设备级 Time Guard 规则仍可能影响业务。
-
-### Proxy App Guard
-
-使用 Nikki 本机 Mihomo 控制 API（127.0.0.1；UCI `nikki.mixin.api_port`，默认9090，`nikki.mixin.api_secret`）。不改变 Mihomo 规则或密钥，不重启代理。需要 curl、jsonfilter。
-
-1. 源 IP 必须精确对应当前非白名单受控设备，并验证目标路由属于已知 WAN/Nikki，不处理路由器自身、局域网、DNS/DoT 或无法验证的目标。
-2. 若原始五元组与 Conntrack 中唯一记录一致，并且 Mark Guard 兼容检查通过，优先采用当前特征库中的完整 OAF 应用 ID。若该 ID 属于允许应用，不再用域名推断覆盖它。
-3. 若没有可靠的已识别 ID，只从当前特征库解析可安全转换的主机名特征。仅接受简单字面主机名、TCP/UDP 与数字端口/端口范围条件；同时要求该规则没有 URI、载荷、字典或其他附加限制。点分字面量按域名标签边界匹配，裸字面量仅匹配倒数第二个域名标签。不是 OAF 原生 DPI/正则引擎的完整复刻。若同一主机名匹配不同应用（包括允许应用或包含额外条件的其他应用），则跳过，防止扩大拦截。复杂正则、通配符、仅载荷特征等由 OAF 自身识别，本模块不直接翻译。
-4. 匹配到禁止应用后，使用单个会话 UUID 的 DELETE API 关闭它。若 Conntrack 五元组也一致，则增加仅该五元组的短期精确阻断。轮询有时间预算，并轮转扫描，避免繁忙设备的连接列表后部持续得不到检查。
-
-本机制仅增强特征库已有识别依据的应用。若特征库只有 `3049 Youtube:[tcp;;;youtube;;]`，不意味着 `googlevideo.com` 或 QUIC 视频连接能够被识别；本版不额外加入这些域名，也不把 TCP 特征扩大为 UDP。若 OAF 本身没有标记，且特征库无可验证匹配，则可能继续播放。应由 OAF 特征库提供覆盖，而非 TGEEK 逐个应用打补丁。代理 API 轮询不是接入前 REJECT，仍可能有短连接或少量传输。不能保证所有应用所有数据流均被拦截，也不能清除客户端已有缓存。
-
-### 时间与安全
-
-只支持当前已验证配置结构的网关模式（`work_mode=0`），实际 `/proc/sys/oaf/enable=1` 且已提交配置启用时才增强。未知模式、无法读取特征库或目标范围时不盲目断流。OAF 关闭或允许时间开始时移除精准表。集合元素25秒自动过期，正常轮询约每轮完成后等待5秒；25秒是失效保护租期，不是整机断流时间。
-
-## 3. 应用统计
-
-```sh
-tgeek-firewall-fix app-stats      # 只显示有命中记录的选中应用
-tgeek-firewall-fix app-stats all  # 包括未命中应用
-```
-
-字段：
-
-| 字段 | 含义 |
-|---|---|
-| ID / NAME | 当前活动特征库的应用 ID、名称 |
-| MARK_PACKETS | TGEEK 精准标记规则拦截包数 |
-| MARK_BYTES | 上述规则拦截的包字节数 |
-| PROXY_MATCHED | 代理匹配事件次数（可能重复） |
-| PROXY_CLOSED | 成功关闭的代理会话次数 |
-| PROXY_FAILED | API 关闭失败次数 |
-| TUPLES_ADDED | 五元组阻断元素添加成功次数（不是唯一连接总数） |
-
-统计存在 `/tmp`，不频繁写入闪存。升级、重启和活动特征库内容改变时重新开始统计；正常 OAF 关闭或规则布局替换时尽力归档旧计数。异常退出、手动删表、服务停止/重新配置导致的未归档计数可能丢失。未启用 OAF 时显示最近一次活动策略的应用名单。原生 OAF 自己的拦截不计入本统计；代理关闭次数和 Mark 包数是不同量纲，不相加。0命中不代表失败，有命中不代表全部流量被阻断。
-
-`app-status` 中 `requested_ids` 是 UCI 有效数字 ID 数，`feature_ids` 为特征库交集，`missing_ids` 为不在库中的 ID 数，`ids` 为已启用 Mark Guard ID 数；`host_rules` 为全库解析出的候选主机特征条目数（含仅用于歧义检查的条目）。`via_mark` / `via_feature` 为本轮匹配来源；`ambiguous` 为主机归属不唯一跳过数；`unverified` 为元数据/目标路由无法验证或保留端口的跳过数；`partial=1` 表示轮询达到时间预算。`matched/closed/failed/tuples` 均为最近一轮。
-
-## 4. 原功能保留
-
-- Time Guard：独立 `tgeek_time_guard_v13`，按 LuCI 防火墙定时设备规则处理新旧连接，约15秒同步；它是设备级 WAN 阻断，与 OAF 应用过滤不同。
-- Smart Offloading：独立 `tgeek_smart_flow_v141`，排除受控设备；全设备/未知模式或不安全环境保守关闭加速。不要同时开启 LuCI 原生流量分载。硬件分载不支持。
-- RRDIPT Guard：停止/禁用 wrtbwmon，检查双栈已知链、悬空启动链接、残留进程，复发时自动清理。未知规则不删除，旧 wrtbwmon 统计停止。每12轮检查（实际间隔随负载变化）。
-- Docker/FW4：原兼容修复及备份保留，`upgrade` 不重复迁移，`install-all` 才调用旧兼容模块。
-- 为兼容升级和旧版清理，精准表仍名为 `tgeek_app_precision_v143`，运行状态目录仍为 `/tmp/tgeek-smart-v141`。不是版本号显示错误。
-
-## 5. 安装及覆盖升级
-
-建议先在 TGEEK 做单机验收，使用未受管控的 LAN 管理设备。保存/撤销 LuCI 未提交配置，确认硬件分载关闭，备份配置。升级会重载防火墙，可能产生短暂影响；不需重启路由器。
+将 tar.gz 上传到 `/tmp` 后：
 
 ```sh
 cd /tmp
-tar -xzvf TGEEK-Firewall-Fix-V1.4.4.tar.gz
-sha256sum -c TGEEK-Firewall-Fix-V1.4.4.sha256
-sh tgeek-firewall-fix-v1.4.4.sh preview
+tar -xzf TGEEK-Firewall-Fix-V1.4.8.tar.gz
+sha256sum -c TGEEK-Firewall-Fix-V1.4.8.sha256
+sh tgeek-firewall-fix-v1.4.8.sh preview
 ```
 
-预检通过后，现有 V1.4–V1.4.3：
+以上均成功后：
 
 ```sh
-sh tgeek-firewall-fix-v1.4.4.sh upgrade
+sh tgeek-firewall-fix-v1.4.8.sh upgrade
 ```
 
-全新设备改用：
+全新设备（原生兼容的 kmod-oaf、appfilter、luci-app-oaf 已安装）用 `install-all` 代替 `upgrade`。无需单独预装 Time Sync；原 V1.4.7.2 的未知旧时间组件拒绝覆盖保护保留。如果没有 OAF，仅安装基础增强，后续安装兼容 OAF 后执行 `luci-install`。需要 fw4/nft/uci/ubus/jsonfilter/ip/awk/sed/cmp/flock/timeout/sha256sum/readlink，Nikki 使用 curl，时间同步需要原生 Lua LuCI 和 nixio。硬件分载应关闭；保存或撤销未提交的 UCI 配置。
 
-```sh
-sh tgeek-firewall-fix-v1.4.4.sh install-all
-```
+## 3. 验证及备份
 
-依赖 fw4、nft、uci、ubus、jsonfilter、ip、awk、sed、cmp、flock、timeout、sha256sum；代理增强还需要 curl。无需安装额外 conntrack CLI。安装前在目标机执行 nft -c 布局预检，失败则拒绝升级。原生软件分载开启时转换为 TGEEK 管理的 smart 模式；关闭时保留 off。新装默认开启精准增强，已使用 V1.4.3 并显式关闭过增强的设备保留该选择，可手动执行 `connection-on`。
-
-## 6. 验证
+等待后台采样，执行：
 
 ```sh
 tgeek-firewall-fix version
-tgeek-firewall-fix verify
-tgeek-firewall-fix app-verify
-tgeek-firewall-fix app-status
-tgeek-firewall-fix app-stats
-tgeek-firewall-fix smart-status
-tgeek-firewall-fix rrd-status
-logread -e tgeek-precision | tail -30
+tgeek-firewall-fix feature-status
+tgeek-firewall-fix feature-verify
+tgeek-firewall-fix health
+tgeek-firewall-fix mark-audit
+```
+
+若当前确认为正确 R1（TIJIWrt 实机 SHA256 `f0544f69b55871d9d9d395b1eef236d3646edf561d38614bce34f65a4fe05500`），且 `feature-verify` 提示尚未建立备份，可手动批准：
+
+```sh
+tgeek-firewall-fix feature-backup
+tgeek-firewall-fix feature-verify
+```
+
+自动备份路径 `/root/tgeek-firewall-fix-v1.3/time-guard/feature-v148/`，`current` 文件内容为已验证的 SHA256，对应 `<SHA256>.cfg`。已有独立备份目录不被覆盖。备份校验成功不代表应用流量一定受阻。
+
+## 4. 日常命令
+
+| 命令（前缀 tgeek-firewall-fix） | 作用 |
+|---|---|
+| `health` | 简洁查看特征、统计、LuCI、时间、服务；不是完整 nft 自检 |
+| `feature-status` | 特征保护状态、现有与备份 SHA、ID 数、最近恢复记录 |
+| `feature-verify` | 当前活动文件与可信备份是否一致 |
+| `feature-backup` | 手动批准当前有效文件并备份（有意更换特征库时使用） |
+| `feature-restore` | 仅空/缺失文件时，从已校验备份恢复，不覆盖非空文件 |
+| `mark-audit` | 受控设备非零 conntrack 标记聚合，不暴露目的地址，不修改规则 |
+| `app-stats` / `app-stats all` | 增强规则命中统计；后者列全部选中 ID |
+| `quic-stats` | IPv4/IPv6 UDP443 命中，表重建计数重新开始 |
+| `luci-verify` / `time-verify` | LuCI RPC、时间规则回读 |
+| `verify` | 完整检查，可能输出大量规则 |
+| `sync` | 触发已有模块同步，可能关闭匹配的受控代理连接 |
+
+故障日志：
+
+```sh
+logread -e tgeek-feature-v148 | tail -30
+cat /tmp/tgeek-smart-v141/feature.status
 cat /tmp/tgeek-v141-smart.error 2>/dev/null
 ```
 
-期望版本 `TGEEK Firewall Fix V1.4.4`。`app-verify` 报告驱动/Mark 冲突、缺失 ID、API 不可用、心跳过期等问题；不要将降级视作完整保护。
+`feature-status` 的历史状态可能晚于当前文件变化；以 `feature-verify` 的即时验证为准。`pending` / `blocked` 不代表 OAF 已停止，精准增强在等待可信特征快照；QUIC 仍按自身条件运行。`mark-audit` 的 `high-bit-candidate` 不是已验证的应用归属。
 
-实机验收：使用测试 Mac，先开启视频或其他应用，再开启 OAF 或等待计划时间；查看新旧连接与统计、是否继续下载而非仅缓存播放；检查白名单、允许应用、LuCI/SSH、DNS 和 NAS 本地访问；关闭 OAF 确认增强规则释放。针对无法确认的应用，按 `app-stats all` 查 ID/名称与命中情况。特征库不能识别的流量应反馈给 OAF 特征库维护者。
+## 5. 特征库安全更新
 
-## 7. 管理与恢复
+优先用原生 OAF 官方支持的特征库导入方式。不要把终端输出粘贴回 SSH，也不要使用 `cat > /etc/appfilter/feature.cfg` 或直接覆盖 `/tmp/feature.cfg`。两者指向同一文件，直接重定向会先截断。若手动更新已知兼容的单个 cfg，先上传临时文件、核对 SHA、确认结构后，在 `/etc/appfilter` 内用临时文件+rename 原子切换；合法 ID 缩减需明确 `feature-backup` 批准。未知 11:03 清空程序仍未定位。保护仅减少后果，不替代查明写入者。
 
-| 命令（前缀 tgeek-firewall-fix） | 用途 |
-|---|---|
-| app-status / cut-status | 运行状态和当前 nftables 表 |
-| app-verify | 精准模块自检 |
-| app-stats / app-stats all | 应用级统计 |
-| connection-on / connection-off | 开关精准增强，不改 OAF |
-| sync | 手动同步；守护锁占用时稍后重试 |
-| flow-smart / flow-off | 管理自有软件分载 |
-| rrd-fix / rrd-status / rrd-rollback | RRD 修复、检查及恢复 |
-| compat-status / compat-install / compat-rollback | Docker 兼容模块 |
-| rollback / uninstall | 移除增强及恢复原生分载（不是自动退回旧版） |
+自动恢复只修复文件并让增强规则重新构建，不强制重启 OAF；如实测原生 DPI 仍无法识别，在本地管理且确认没有保存/时间同步任务时执行原生 `/etc/init.d/appfilter restart`，然后 `time-verify`、`luci-verify`，并实际测试应用。外部程序不共享本项目锁，原子切换不能完全排除并行写入竞争。不要在生产路由器故意清空特征库测试，建议使用测试虚拟机。
 
-意外误伤时优先 `tgeek-firewall-fix connection-off`。若需立即解除，可使用另一台管理设备执行 `/etc/init.d/tgeek-firewall-guard stop`，再执行 `nft delete table inet tgeek_app_precision_v143`（表可能已不存在）。这也会暂停智能分载和 RRD 自动检查；不会移除原生 OAF 或 Time Guard。不要清空整个 nftables 或 Conntrack。升级备份 `/root/tgeek-firewall-fix-v1.3/time-guard/v144-backup-*`，历史备份保留。退回 V1.4.3 可使用原包 `upgrade`，仍需检查原先的配置及开启状态。
+## 6. 退回 V1.4.7.2（不是卸载）
 
-## 8. 开发验证和边界
+保留旧版安装器，按旧版正常覆盖升级流程重新执行：
 
-本地 BusyBox ash 语法通过；模拟测试通过：任意新增 ID、特征库同步、协议/端口约束、共用域名、载荷条件不扩大、允许应用标记优先、白名单、局域网/DNS 排除、双栈、精确五元组、计数汇总、OAF 关闭及 Mark 冲突降级。RRDIPT 原回归通过（卸载后残留、双栈、悬空链接、复发、未知引用保护）。模拟 nft 和 API 不等于实际内核加载或实机网络测试。开发容器未安装 nftables，实际语法/内核能力由路由器 preview 验证。YouTube 等所有未覆盖数据流、吞吐及管理连接行为尚需实机验证。
-
-参考：OAF 特征格式 https://doc.openappfilter.com/en/download.html；OAF https://github.com/destan19/OpenAppFilter；Mihomo https://wiki.metacubex.one/en/api/；nftables 命名计数器 https://wiki.nftables.org/wiki-nftables/index.php/Counters 。
-
-一、补充 YouTube 特征库
-修改前：
-3049 Youtube:[tcp;;;youtube;;]
-
-
-修改后：
-3049 Youtube:[tcp;;;youtube;;,tcp;;;googlevideo.com;;,tcp;;;ytimg.com;;,tcp;;;youtu.be;;]
-
-
-这种修改符合 OAF 官方特征库的域名匹配格式。
-OpenAppFilter
-
-二、一键备份并修改
-在 TGEEK 执行以下完整命令，包含原始文件备份及规则校验：
+```sh
+cd /tmp
+sh tgeek-firewall-fix-v1.4.7.2.sh preview
+sh tgeek-firewall-fix-v1.4.7.2.sh upgrade
+tgeek-firewall-fix version
+tgeek-firewall-fix time-verify
+tgeek-firewall-fix luci-verify
 ```
-(
-    set -e
 
-    FILE=/etc/appfilter/feature.cfg
-    BACKUP=/root/oaf-feature-backup
-    NEW="${FILE}.new"
+这是兼容性回退路径，尚未实机测试。不要用 `rollback` / `uninstall` 代替，它们会移除整个增强层并受到独立星期规则回滚保护。V1.4.8 本次安装保存基础组件的备份 `.../v148-backup-*`；Feature Guard 的备份保留，V1.4.7.2 不会自动使用它。完整升级沿用旧版多阶段事务，非整体原子回滚，若中途失败应保留日志和安装器给出的备份路径。
 
-    mkdir -p "$BACKUP"
+## 7. 测试边界
 
-    echo "===== 检查原始特征 ====="
-
-    [ "$(grep -c '^3049 ' "$FILE")" = "1" ] || {
-        echo "应用 ID 异常，停止修改"
-        exit 1
-    }
-
-    grep -q '^3049 Youtube:\[tcp;;;youtube;;\][[:space:]]*$' "$FILE" || {
-        echo "原始规则已变化，停止修改"
-        exit 1
-    }
-
-    echo "===== 备份原始特征库 ====="
-
-    BAK="$BACKUP/feature.cfg.$(date +%Y%m%d-%H%M%S)"
-    cp -p "$FILE" "$BAK"
-
-    echo "备份位置: $BAK"
-
-    echo "===== 更新 YouTube 特征 ====="
-
-    cp -p "$FILE" "$NEW"
-
-    sed 's/^3049 Youtube:.*/3049 Youtube:[tcp;;;youtube;;,tcp;;;googlevideo.com;;,tcp;;;ytimg.com;;,tcp;;;youtu.be;;]/' \
-        "$FILE" > "$NEW"
-
-    grep -q '^3049 Youtube:.*googlevideo' "$NEW"
-
-    [ "$(wc -l < "$FILE")" = "$(wc -l < "$NEW")" ]
-
-    mv -f "$NEW" "$FILE"
-
-    echo "===== 修改结果 ====="
-    grep '^3049 ' "$FILE"
-
-    echo "特征库修改成功"
-)
-```
+详见 TEST.txt。仅完成本地语法和隔离逻辑测试，尚未在两台路由器运行 V1.4.8。真正的 nft 内核装载、procd、真实 Lua JSON 模块、原生 DPI/代理拦截、切换时段及升级/回退需实机确认。未解决的高位标记语义不能凭观察值直接推断；本版不修改精确匹配规则。实际安装完成后先用 health 检查，再用受控设备测试淘宝、腾讯视频、YouTube 等新内容，并确认白名单/非受控设备正常。所有应用模式不是全网断网。
